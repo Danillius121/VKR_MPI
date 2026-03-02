@@ -14,7 +14,7 @@ class Program
         {
             Intracommunicator comm = Communicator.world;
 
-            string targetPath = "";
+            string targetPath = "123";
             int pathLength = 0;
             byte[] pathData = null;
 
