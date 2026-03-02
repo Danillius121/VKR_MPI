@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "VKR_MPI_V1": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
