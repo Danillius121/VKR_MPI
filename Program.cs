@@ -12,19 +12,40 @@ class Program
     {
         using (new MPI.Environment(ref args))
         {
+            int outputMode = 1; // 1 - Консоль, 2 - Файл
+            int[] modeBuffer = new int[1];
+
             Intracommunicator comm = Communicator.world;
 
-            string targetPath = "123";
+            string targetPath = "";
             int pathLength = 0;
             byte[] pathData = null;
-
             if (comm.Rank == 0)
             {
                 Console.Write("[MASTER] Введите путь: ");
                 targetPath = Console.ReadLine() ?? "";
                 pathData = System.Text.Encoding.UTF8.GetBytes(targetPath);
                 pathLength = pathData.Length;
+
+                Console.WriteLine("\nВыберите способ вывода результатов:");
+                Console.WriteLine("1. Вывод в консоль (с подсветкой)");
+                Console.WriteLine("2. Сохранение в файлы (рекомендуется для больших объемов)");
+                Console.Write("Ваш выбор: ");
+
+                if (!int.TryParse(Console.ReadLine(), out outputMode)) outputMode = 1;
+                modeBuffer[0] = outputMode;
             }
+
+            // Передаем массив из одного целого числа (это самая стабильная операция в MPI.NET)
+            comm.Broadcast(ref modeBuffer, 0);
+
+            // Все воркеры забирают значение из буфера
+            if (comm.Rank != 0) outputMode = modeBuffer[0];
+
+            bool saveToFile = (outputMode == 2);
+
+            // Барьер для фиксации настроек на всех узлах
+            comm.Barrier();
 
             // 1. Сначала ВСЕ (и Мастер, и Воркеры) синхронно обмениваются длиной строки
             comm.Broadcast(ref pathLength, 0);
@@ -130,63 +151,96 @@ class Program
             // Инициализируем Regex (скомпилированный вариант для скорости)
             Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+            // 1. СИНХРОНИЗАЦИЯ ПЕРЕД СТАРТОМ
             comm.Barrier();
-            if (comm.Rank == 0) Console.WriteLine($">>> Начинаю поиск паттерна: '{pattern}'...");
-
+            Stopwatch totalSw = Stopwatch.StartNew();
 
             long localMatches = 0;
-            Stopwatch sw = Stopwatch.StartNew();
+            // Инициализируем StreamWriter, если выбрано сохранение в файл
+            StreamWriter writer = null;
+            if (saveToFile)
+            {
+                // Каждый процесс пишет в свой файл: это "Best Practice" для MPI
+                writer = new StreamWriter($"results_rank_{comm.Rank}.txt", false);
+            }
 
-            // Выполняем поиск
             foreach (var filePath in myTaskFiles)
             {
                 try
                 {
-                    // Используем FileStream для более стабильного чтения в сетевых окружениях
-                    using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    using (StreamReader reader = new StreamReader(fs))
+                    using (var reader = new StreamReader(filePath))
                     {
                         string line;
+                        int lineNumber = 0;
                         while ((line = reader.ReadLine()) != null)
                         {
+                            lineNumber++;
                             if (regex.IsMatch(line))
                             {
                                 localMatches++;
+
+                                if (saveToFile)
+                                {
+                                    writer.WriteLine($"[{Path.GetFileName(filePath)} : {lineNumber}] {line}");
+                                }
+                                else
+                                {
+                                    // ВЫВОД В КОНСОЛЬ С ПОДСВЕТКОЙ
+                                    lock (Console.Out) // Минимальная защита от перемешивания строк
+                                    {
+                                        Console.ForegroundColor = ConsoleColor.Cyan;
+                                        Console.Write($"[Rank {comm.Rank}] ");
+                                        Console.ResetColor();
+                                        Console.Write($"{Path.GetFileName(filePath)}:{lineNumber} > ");
+
+                                        HighlightAndPrint(line, regex);
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    // Логируем ошибку, но НЕ выходим из программы
-                    Console.WriteLine($"[Rank {comm.Rank}] Ошибка доступа: {Path.GetFileName(filePath)}");
-                }
+                catch { /* Пропуск ошибок доступа */ }
             }
-            sw.Stop();
 
-            // ТОЧКА СИНХРОНИЗАЦИИ: Ждем, пока ВСЕ закончат чтение своих файлов
+            if (writer != null) writer.Close();
+
+            // 2. СИНХРОНИЗАЦИЯ ПОСЛЕ ПОИСКА
             comm.Barrier();
+            totalSw.Stop();
 
-            // ВАЖНО: Эту строку должны вызвать ВСЕ одновременно
-            long totalMatches = 0;
-            totalMatches = comm.Reduce(localMatches, Operation<long>.Add, 0);
+            // Сбор суммы (Reduce)
+            long totalMatches = comm.Reduce(localMatches, Operation<long>.Add, 0);
 
-            // Вывод итогов только на мастере
             if (comm.Rank == 0)
             {
                 Console.WriteLine("\n" + new string('=', 40));
-                Console.WriteLine($"✅ ПОИСК ЗАВЕРШЕН");
-                Console.WriteLine($"📊 Найдено совпадений: {totalMatches}");
-                Console.WriteLine($"⏱ Время (Rank 0): {sw.Elapsed.TotalSeconds:F3} сек.");
+                Console.WriteLine($"✅ ПОЛНОЕ ВРЕМЯ РАБОТЫ: {totalSw.Elapsed.TotalSeconds:F3} сек.");
+                Console.WriteLine($"📊 Найдено всего: {totalMatches}");
+                if (saveToFile) Console.WriteLine("📂 Результаты сохранены в раздельные файлы по рангам.");
                 Console.WriteLine(new string('=', 40));
+            }
 
-                // На Rank 0 ReadLine допустим для удержания окна
-                Console.WriteLine("Нажмите Enter для выхода...");
-                Console.ReadLine();
+            // Метод для подсветки
+            static void HighlightAndPrint(string line, Regex regex)
+            {
+                int lastIndex = 0;
+                foreach (Match m in regex.Matches(line))
+                {
+                    Console.Write(line.Substring(lastIndex, m.Index - lastIndex));
+                    Console.BackgroundColor = ConsoleColor.DarkYellow;
+                    Console.ForegroundColor = ConsoleColor.Black;
+                    Console.Write(m.Value);
+                    Console.ResetColor();
+                    lastIndex = m.Index + m.Length;
+                }
+                Console.WriteLine(line.Substring(lastIndex));
             }
 
 
         }
+
+
     }
 
     static List<string> GetFilesSafe(string rootPath)
@@ -213,5 +267,5 @@ class Program
         }
         return files;
     }
-
+    
 }
