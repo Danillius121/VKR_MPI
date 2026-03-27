@@ -56,6 +56,34 @@ class Program
                 modeBuffer[0] = outputMode;
             }
 
+            string pattern = "";
+            byte[] patternData = null;
+            int patternLength = 0;
+
+            if (comm.Rank == 0)
+            {
+                Console.Write("[MASTER] Введите регулярное выражение (RegEx): ");
+                pattern = Console.ReadLine() ?? "";
+                patternData = System.Text.Encoding.UTF8.GetBytes(pattern);
+                patternLength = patternData.Length;
+            }
+
+            // Передаем длину паттерна всем узлам
+            comm.Broadcast(ref patternLength, 0);
+
+            // Воркеры готовят буфер
+            if (comm.Rank != 0) patternData = new byte[patternLength];
+
+            // Передаем сами байты паттерна
+            comm.Broadcast(ref patternData, 0);
+
+            // Восстанавливаем строку на воркерах
+            if (comm.Rank != 0) pattern = System.Text.Encoding.UTF8.GetString(patternData);
+              
+            // Инициализируем Regex (скомпилированный вариант для скорости)
+            Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+
             // Рассылаем выбор всем (через наш стабильный метод с массивом)
             int[] modeBuf = { processingMode };
             comm.Broadcast(ref modeBuf, 0);
@@ -92,18 +120,19 @@ class Program
             if (processingMode == 1)
             {
                 // Тот код, который мы отладили (раздача путей через Send/Receive)
-                RunMultiFileSearch(comm, targetPath, saveToFile);
+                RunMultiFileSearch(comm, targetPath, saveToFile, regex);
             }
             else
             {
-                // РЕЖИМ 2: Один большой файл (Новая логика по твоему плану)
+                // РЕЖИМ 2: Один большой файл
                 if (comm.Rank == 0)
                 {
+                    Stopwatch totalSw = Stopwatch.StartNew();
                     // Мастер становится Диспетчером
                     long totalMatches = Master_ScheduleLargeFile(comm, targetPath, minSizeInBytes);
-
+                    totalSw.Stop();
                     // Вывод итогов только здесь
-                    PrintFinalResult(totalMatches, sw.Elapsed);
+                    PrintFinalResult(totalMatches, totalSw.Elapsed.TotalSeconds);
                 }
                 else
                 {
@@ -120,7 +149,7 @@ class Program
 
     }
 
-    static void RunMultiFileSearch(Intracommunicator comm, string targetPath, bool saveToFile)
+    static void RunMultiFileSearch(Intracommunicator comm, string targetPath, bool saveToFile, Regex regex)
     {
 
         // Теперь каждый процесс безопасно получает список доступных файлов
@@ -183,33 +212,7 @@ class Program
 
         if (comm.Rank == 0) Console.WriteLine(">>> Все узлы синхронизированы. Начинаем распределение файлов...");
 
-        string pattern = "";
-        byte[] patternData = null;
-        int patternLength = 0;
-
-        if (comm.Rank == 0)
-        {
-            Console.Write("[MASTER] Введите регулярное выражение (RegEx): ");
-            pattern = Console.ReadLine() ?? "";
-            patternData = System.Text.Encoding.UTF8.GetBytes(pattern);
-            patternLength = patternData.Length;
-        }
-
-        // Передаем длину паттерна всем узлам
-        comm.Broadcast(ref patternLength, 0);
-
-        // Воркеры готовят буфер
-        if (comm.Rank != 0) patternData = new byte[patternLength];
-
-        // Передаем сами байты паттерна
-        comm.Broadcast(ref patternData, 0);
-
-        // Восстанавливаем строку на воркерах
-        if (comm.Rank != 0) pattern = System.Text.Encoding.UTF8.GetString(patternData);
-
-        // Инициализируем Regex (скомпилированный вариант для скорости)
-        Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
+        
         // 1. СИНХРОНИЗАЦИЯ ПЕРЕД СТАРТОМ
         comm.Barrier();
         Stopwatch totalSw = Stopwatch.StartNew();
@@ -433,9 +436,9 @@ class Program
                 totalMatches += workerResult;
                 completedTasks++;
 
-                // Выводим прогресс на мастере (Пункт 5 твоего плана)
-                if (totalTasks > 0)
-                    DrawProgressBar(completedTasks, totalTasks);
+                // Выводим прогресс на мастере 
+                //if (totalTasks > 0)
+                    //DrawProgressBar(completedTasks, totalTasks);
             }
         }
 
@@ -457,19 +460,19 @@ class Program
             // Выполняем поиск в чанке
             long foundInChunk = ProcessFileChunk(filePath, startOffset, minSize, regex);
 
-            // ОТПРАВЛЯЕМ РЕЗУЛЬТАТ МАСТЕРУ (Пункт 4 твоего плана)
+            // ОТПРАВЛЯЕМ РЕЗУЛЬТАТ МАСТЕРУ 
             comm.Send(foundInChunk, 0, (int)MsgTag.ResultReport);
         }
     }
 
-    static void PrintFinalResult(long totalMatches, TimeSpan elapsed)
+    static void PrintFinalResult(long totalMatches, double elapsed)
     {
         Console.WriteLine("\n" + new string('=', 40));
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"✅ ПОИСК ЗАВЕРШЕН");
+        Console.WriteLine($" ПОИСК ЗАВЕРШЕН");
         Console.ResetColor();
-        Console.WriteLine($"📊 Найдено совпадений: {totalMatches}");
-        Console.WriteLine($"⏱ Полное время работы: {elapsed.TotalSeconds:F3} сек.");
+        Console.WriteLine($" Найдено совпадений: {totalMatches}");
+        Console.WriteLine($" Полное время работы: {elapsed:F3} сек.");
 
         // Для диплома: расчет теоретической пропускной способности
         // (если добавишь размер файла в аргументы)
