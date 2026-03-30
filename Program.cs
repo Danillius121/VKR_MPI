@@ -1,10 +1,11 @@
 ﻿using MPI; // Не забудь добавить ссылку на библиотеку через NuGet
 using System;
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 
 class Program
 {
@@ -18,8 +19,21 @@ class Program
     }
 
     // Глобальные настройки
-    static long minSizeInBytes = 64 * 1024 * 1024; // По умолчанию 64 МБ
+    static long minSizeInBytes = 256 * 1024 * 1024; // По умолчанию 64 МБ
 
+    static readonly object ConsoleLock = new object();
+    static StreamWriter? traceWriter;
+
+    static void Trace(int rank, string message)
+    {
+        string line = $"[{DateTime.UtcNow:O}] [Rank {rank}] {message}";
+        lock (ConsoleLock)
+        {
+            Console.WriteLine(line);
+        }
+        traceWriter?.WriteLine(line);
+        traceWriter?.Flush();
+    }
 
     static void Main(string[] args)
     {
@@ -31,6 +45,10 @@ class Program
 
             Intracommunicator comm = Communicator.world;
 
+            traceWriter = new StreamWriter($"trace_rank_{comm.Rank}.log", false)
+            {
+                AutoFlush = true
+            };
             string targetPath = "";
             int pathLength = 0;
             byte[] pathData = null;
@@ -138,6 +156,7 @@ class Program
                 {
                     // Воркеры уходят в цикл запроса задач
                     Worker_ProcessLargeFile(comm, targetPath, regex, minSizeInBytes);
+                    traceWriter?.Dispose();
                 }
             }
 
@@ -362,31 +381,44 @@ class Program
     static long ProcessFileChunk(string path, long startOffset, long minSize, Regex regex)
     {
         long matches = 0;
-        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-        {
-            // Находим реальный старт строки (Пункт 3 твоего плана)
-            long actualStart = (startOffset == 0) ? 0 : FindNextLineStart(fs, startOffset);
-            fs.Seek(actualStart, SeekOrigin.Begin);
 
-            using (StreamReader sr = new StreamReader(fs))
+        // FileShare.ReadWrite безопаснее, если лог в данный момент пишется другим приложением
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            // 1. Быстрый пропуск хвоста предыдущей строки, если мы не в начале файла
+            if (startOffset > 0)
+            {
+                fs.Position = startOffset;
+                int b;
+                // Ищем первый перенос строки
+                while ((b = fs.ReadByte()) != -1)
+                {
+                    if (b == '\n') break;
+                }
+            }
+
+            long currentBytesProcessed = 0;
+
+            using (StreamReader sr = new StreamReader(fs, System.Text.Encoding.UTF8))
             {
                 string line;
-                long endBoundary = startOffset + minSize;
 
-                // Читаем, пока не пересечем границу MinimalSize 
-                // и обязательно дочитываем последнюю строку до конца
-                while (fs.Position < endBoundary && (line = sr.ReadLine()) != null)
+                // Читаем строки до тех пор, пока сумма их длин не превысит размер нашего квантума
+                while (currentBytesProcessed < minSize && (line = sr.ReadLine()) != null)
                 {
-                    if (regex.IsMatch(line)) matches++;
-                }
+                    if (regex.IsMatch(line))
+                    {
+                        matches++;
+                    }
 
-                // Дочитываем "хвост" строки за границей чанка (Пункт 2 плана)
-                if (fs.Position >= endBoundary && (line = sr.ReadLine()) != null)
-                {
-                    if (regex.IsMatch(line)) matches++;
+                    // Вычисляем реальный вес строки в байтах.
+                    // +2 добавлено для учета символов переноса строки (\r\n) в Windows.
+                    // Если логи с Linux-серверов (\n), измените +2 на +1.
+                    currentBytesProcessed += System.Text.Encoding.UTF8.GetByteCount(line) + 2;
                 }
             }
         }
+
         return matches;
     }
 
@@ -445,23 +477,122 @@ class Program
         return totalMatches;
     }
 
-    static void Worker_ProcessLargeFile(Intracommunicator comm, string filePath, Regex regex, long minSize)
+    static void Worker_ProcessLargeFile(
+    Intracommunicator comm,
+    string filePath,
+    Regex regex,
+    long chunkSize)
     {
+        int rank = comm.Rank;
+        Trace(rank, $"Worker started. file={filePath}, chunkSize={chunkSize}");
+
+        // Один FileStream на весь worker (ВАЖНО)
+        using FileStream fs = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            FileOptions.SequentialScan);
+
+        byte[] buffer = new byte[4 * 1024 * 1024]; // 4 MB буфер
+        Decoder decoder = Encoding.UTF8.GetDecoder();
+        char[] charBuffer = new char[buffer.Length];
+
         while (true)
         {
-            // Просим задачу
+            // === REQUEST ===
             comm.Send(0, 0, (int)MsgTag.TaskRequest);
 
-            long startOffset;
-            comm.Receive(0, (int)MsgTag.TaskResponse, out startOffset);
+            long offset;
+            comm.Receive(0, (int)MsgTag.TaskResponse, out offset);
 
-            if (startOffset == -1) break; // Финиш
+            if (offset == -1)
+            {
+                Trace(rank, "Stop signal received");
+                break;
+            }
 
-            // Выполняем поиск в чанке
-            long foundInChunk = ProcessFileChunk(filePath, startOffset, minSize, regex);
+            Stopwatch sw = Stopwatch.StartNew();
 
-            // ОТПРАВЛЯЕМ РЕЗУЛЬТАТ МАСТЕРУ 
-            comm.Send(foundInChunk, 0, (int)MsgTag.ResultReport);
+            long matches = 0;
+            long end = Math.Min(offset + chunkSize, fs.Length);
+
+            // === SEEK ===
+            fs.Seek(offset, SeekOrigin.Begin);
+
+            // === ALIGN TO LINE START (если не первый блок) ===
+            if (offset != 0)
+            {
+                int b;
+                while ((b = fs.ReadByte()) != -1)
+                {
+                    if (b == '\n') break;
+                }
+            }
+
+            StringBuilder lineBuilder = new StringBuilder(1024);
+
+            long currentPos = fs.Position;
+
+            while (currentPos < end)
+            {
+                int bytesToRead = (int)Math.Min(buffer.Length, end - currentPos);
+                int bytesRead = fs.Read(buffer, 0, bytesToRead);
+
+                if (bytesRead == 0)
+                    break;
+
+                int charsDecoded = decoder.GetChars(buffer, 0, bytesRead, charBuffer, 0, false);
+
+                for (int i = 0; i < charsDecoded; i++)
+                {
+                    char c = charBuffer[i];
+
+                    if (c == '\n')
+                    {
+                        string line = lineBuilder.ToString();
+                        lineBuilder.Clear();
+
+                        if (regex.IsMatch(line))
+                            matches++;
+                    }
+                    else if (c != '\r')
+                    {
+                        lineBuilder.Append(c);
+                    }
+                }
+
+                currentPos = fs.Position;
+            }
+
+            // === ДОЧИТЫВАЕМ ХВОСТ СТРОКИ ===
+            int nextByte;
+            while ((nextByte = fs.ReadByte()) != -1)
+            {
+                char c = (char)nextByte;
+
+                if (c == '\n')
+                {
+                    string line = lineBuilder.ToString();
+                    lineBuilder.Clear();
+
+                    if (regex.IsMatch(line))
+                        matches++;
+
+                    break;
+                }
+                else if (c != '\r')
+                {
+                    lineBuilder.Append(c);
+                }
+            }
+
+            sw.Stop();
+
+            Trace(rank, $"Chunk done offset={offset}, matches={matches}, time={sw.ElapsedMilliseconds}ms");
+
+            comm.Send(matches, 0, (int)MsgTag.ResultReport);
         }
     }
 
