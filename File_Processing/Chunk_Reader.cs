@@ -14,14 +14,7 @@ namespace VKR_MPI_V1.File_Processing
 
         public Chunk_Reader(string path, int chunkSize, int overlap)
         {
-            _fs = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 4 * 1024 * 1024,
-                FileOptions.SequentialScan);
-
+            _fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4 * 1024 * 1024, FileOptions.SequentialScan);
             _chunkSize = chunkSize;
             _overlap = overlap;
         }
@@ -29,22 +22,29 @@ namespace VKR_MPI_V1.File_Processing
         public IEnumerable<Chunk> ReadChunks()
         {
             long offset = 0;
-            byte[] buffer = new byte[_chunkSize + _overlap];
 
             while (true)
             {
-                _fs.Seek(offset, SeekOrigin.Begin);
+                // ИСПРАВЛЕНИЕ: Выделяем новый буфер для каждого чанка,
+                // иначе параллельные потоки перепишут друг другу память
+                byte[] buffer = new byte[_chunkSize + _overlap];
 
+                _fs.Seek(offset, SeekOrigin.Begin);
                 int read = _fs.Read(buffer, 0, buffer.Length);
+
                 if (read == 0)
                     yield break;
+
+                // ИСПРАВЛЕНИЕ: Если мы дошли до конца файла, ValidEnd делаем максимальным, 
+                // чтобы регулярка не "обрезала" совпадения в конце.
+                long validEnd = (offset + _chunkSize >= _fs.Length) ? long.MaxValue : offset + _chunkSize;
 
                 yield return new Chunk
                 {
                     Buffer = buffer,
                     Length = read,
                     GlobalStart = offset,
-                    ValidEnd = offset + _chunkSize
+                    ValidEnd = validEnd
                 };
 
                 offset += _chunkSize;

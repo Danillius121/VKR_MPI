@@ -33,7 +33,7 @@ namespace VKR_MPI_V1.Processing
 
                 matches++;
             }
-
+            Console.WriteLine($"Matches in chunk starting {chunk.GlobalStart}: {matches}");
             return matches;
         }
     }

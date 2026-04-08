@@ -12,9 +12,9 @@ namespace VKR_MPI_V1.MPI_Layer
     {
         public static void WorkerMPI(Intracommunicator comm, AppConfig config)
         {
-            long localResult = Consumer.ProcessFile(config);
+            //long localResult = Consumer.ProcessFile(config);
 
-            long global = comm.Reduce(localResult, Operation<long>.Add, 0);
+            //long global = comm.Reduce(localResult, Operation<long>.Add, 0);
         }
     }
 }
