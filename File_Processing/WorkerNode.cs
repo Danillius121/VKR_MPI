@@ -1,0 +1,147 @@
+﻿using MPI;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace VKR_MPI_V1;
+
+internal static class WorkerNode
+{
+
+    public static void Run(Communicator world, AppConfig config)
+    {
+        var processor = new RegexChunkProcessor(config);
+
+        while (true)
+        {
+            (ChunkHeader header, byte[] buffer) = MpiWire.ReceiveChunk(world, 0);
+
+            if (header.IsStopSignal)
+                return;
+
+            try
+            {
+                long matches = processor.Process(buffer, header.PrimaryLength, header.ReadLength);
+
+                var result = new ResultHeader(
+                    WorkerRank: world.Rank,
+                    FileIndex: header.FileIndex,
+                    ChunkIndex: header.ChunkIndex,
+                    Success: true,
+                    Matches: matches,
+                    BytesProcessed: header.PrimaryLength,
+                    ErrorMessage: null);
+
+                MpiWire.SendResult(world, 0, result);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Rank {world.Rank}: chunk #{header.ChunkIndex} failed: {ex.Message}");
+
+                var result = new ResultHeader(
+                    WorkerRank: world.Rank,
+                    FileIndex: header.FileIndex,
+                    ChunkIndex: header.ChunkIndex,
+                    Success: false,
+                    Matches: 0,
+                    BytesProcessed: 0,
+                    ErrorMessage: ex.Message);
+
+                MpiWire.SendResult(world, 0, result);
+            }
+        }
+    }
+
+    private sealed class RegexChunkProcessor
+    {
+
+        private readonly Regex _regex;
+        private readonly Encoding _encoding;
+        private readonly int _workerThreads;
+        private readonly int _sliceOverlapChars;
+
+        public RegexChunkProcessor(AppConfig config)
+        {
+            _encoding = Encoding.GetEncoding(config.EncodingName);
+            _workerThreads = Math.Max(1, config.WorkerThreads);
+            _sliceOverlapChars = Math.Max(0, config.WorkerSubChunkOverlapChars);
+
+            var options = RegexOptions.Compiled | RegexOptions.Multiline | RegexOptions.CultureInvariant;
+            var timeout = config.RegexTimeoutMs > 0
+                ? TimeSpan.FromMilliseconds(config.RegexTimeoutMs)
+                : Regex.InfiniteMatchTimeout;
+
+            _regex = new Regex(config.Pattern, options, timeout);
+        }
+
+        public long Process(byte[] buffer, int primaryLength, int readLength)
+        {
+            if (readLength <= 0 || buffer.Length == 0)
+                return 0;
+
+            string text = _encoding.GetString(buffer, 0, readLength);
+            int primaryCharLimit = _encoding.GetCharCount(buffer, 0, primaryLength);
+
+            var slices = BuildSlices(text, _workerThreads, _sliceOverlapChars);
+            long total = 0;
+            
+            Parallel.ForEach(
+                slices,
+                new ParallelOptions { MaxDegreeOfParallelism = _workerThreads },
+                slice =>
+                {
+                    long local = 0;
+                    string segment = text.Substring(slice.Start, slice.ReadLength);
+
+                    foreach (Match match in _regex.Matches(segment))
+                    {
+                        int globalMatchStart = slice.Start + match.Index;
+                        if (globalMatchStart < primaryCharLimit)
+                            local++;
+                    }
+
+                    if (local != 0)
+                        Interlocked.Add(ref total, local);
+                });
+
+            return total;
+        }
+
+        private static List<TextSlice> BuildSlices(string text, int desiredSlices, int overlapChars)
+        {
+            var result = new List<TextSlice>();
+            if (text.Length == 0)
+                return result;
+
+            desiredSlices = Math.Clamp(desiredSlices, 1, Math.Max(1, text.Length));
+            int approx = Math.Max(1, text.Length / desiredSlices);
+
+            int start = 0;
+            for (int i = 0; i < desiredSlices && start < text.Length; i++)
+            {
+                int primaryEnd = (i == desiredSlices - 1)
+                    ? text.Length
+                    : Math.Min(text.Length, start + approx);
+
+                if (primaryEnd < text.Length)
+                {
+                    while (primaryEnd < text.Length && text[primaryEnd] != '\n')
+                        primaryEnd++;
+
+                    if (primaryEnd < text.Length)
+                        primaryEnd++;
+                }
+
+                int readEnd = Math.Min(text.Length, primaryEnd + overlapChars);
+                result.Add(new TextSlice(start, primaryEnd, readEnd - start));
+                start = primaryEnd;
+            }
+
+            if (result.Count == 0)
+                result.Add(new TextSlice(0, text.Length, text.Length));
+
+            return result;
+        }
+
+        private readonly record struct TextSlice(int Start, int PrimaryEndExclusive, int ReadLength);
+    }
+}

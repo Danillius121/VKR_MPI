@@ -1,89 +1,64 @@
-﻿using MPI; // Не забудь добавить ссылку на библиотеку через NuGet
-using System;
-using System.Collections.Generic;
+﻿using MPI;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Text.Json;
-using System.Text.RegularExpressions;
+using System.Text;
+using VKR_MPI_V1;
+using System.Text;
 using System.Text.Json;
 
 namespace VKR_MPI_V1
 {
-    class Program
+    internal static class Program
     {
-        static void Main(string[] args)
+        private static int Main(string[] args)
         {
-            using (new MPI.Environment(ref args))
-            {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-                var comm = Communicator.world;
-                var config = LoadConfig();
+            using var env = new MPI.Environment(ref args);
+            var world = Communicator.world;
 
-                List<string> files = new List<string>();
-
-                // 1. Только Master (Rank 0) сканирует директорию
-                if (comm.Rank == 0)
-                {
-                    files = GetFilesSafe(config.FilePath);
-                    Console.WriteLine($"[MASTER]: Найдено файлов: {files.Count}");
-                }
-
-                // 2. Рассылаем список файлов всем процессам
-                comm.Broadcast(ref files, 0);
-
-                long localMatches = 0;
-
-                // 3. Каждый процесс обрабатывает только "свои" файлы
-                for (int i = 0; i < files.Count; i++)
-                {
-                    if (i % comm.Size == comm.Rank)
-                    {
-                        // Передаем конкретный файл в ProcessFile
-                        localMatches += Pipeline.Consumer.ProcessFile(files[i], config);
-                    }
-                }
-
-                // 4. Собираем результаты со всех узлов
-                long globalTotal = comm.Reduce(localMatches, Operation<long>.Add, 0);
-
-                if (comm.Rank == 0)
-                {
-                    Console.WriteLine($"Total matches: {globalTotal}");
-                }
-
-            }
-        }
-
-        static AppConfig LoadConfig(string path = "appconfig.json")
-        {
-            if (!File.Exists(path))
-                return new AppConfig();
-
-            string json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig();
-        }
-        static List<string> GetFilesSafe(string path)
-        {
-            var result = new List<string>();
             try
             {
-                // Проверяем, если указан конкретный файл, а не папка
-                if (File.Exists(path))
-                {
-                    result.Add(path);
-                    return result;
-                }
+                var config = ConfigLoader.Load("appconfig.json");
 
-                result.AddRange(Directory.GetFiles(path));
-                foreach (var dir in Directory.GetDirectories(path))
-                {
-                    result.AddRange(GetFilesSafe(dir));
-                }
+                if (world.Rank == 0)
+                    MasterNode.Run(world, config);
+                else
+                    WorkerNode.Run(world, config);
+
+                return 0;
             }
-            catch (Exception) { /* игнорируем ошибки доступа */ }
-            return result;
+            catch (Exception ex)
+            {
+                Logger.Error($"Rank {world.Rank}: fatal error: {ex}");
+                return 1;
+            }
         }
-    
+    }
+
+    internal static class ConfigLoader
+    {
+        public static AppConfig Load(string fileName)
+        {
+            string path = Path.IsPathRooted(fileName)
+                ? fileName
+                : Path.Combine(AppContext.BaseDirectory, fileName);
+
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"Config file not found: {path}");
+
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                ReadCommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            };
+
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            var config = JsonSerializer.Deserialize<AppConfig>(json, options)
+                         ?? throw new InvalidOperationException("Failed to deserialize appconfig.json.");
+
+            config.Validate();
+            return config;
+        }
     }
 }
