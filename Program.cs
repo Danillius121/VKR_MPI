@@ -13,17 +13,50 @@ namespace VKR_MPI_V1
         {
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-            using var env = new MPI.Environment(ref args);
+            using var mpiEnv = new MPI.Environment(ref args);
             var world = Communicator.world;
 
             try
             {
                 var config = ConfigLoader.Load("appconfig.json");
+                NodeContext topo = NodeTopology.Initialize(world);
 
-                if (world.Rank == 0)
-                    MasterNode.Run(world, config);
+                if (topo.IsNodeLeader)
+                {
+                    string? inputPath = System.Environment.GetEnvironmentVariable("NODE_INPUT_PATH");
+                    if (!string.IsNullOrWhiteSpace(inputPath))
+                        config.FilePath = inputPath;
+                    else if (string.IsNullOrWhiteSpace(config.FilePath))
+                        throw new InvalidOperationException("Config.FilePath is empty and NODE_INPUT_PATH is not set.");
+
+                    long localMatches = MasterNode.Run(topo.NodeComm, config);
+
+                    if (world.Rank != 0)
+                    {
+                        world.Send(localMatches, 0, 9100);
+                    }
+                    else
+                    {
+                        long total = localMatches;
+
+                        for (int i = 1; i < topo.NodeCount; i++)
+                        {
+                            total += world.Receive<long>(Communicator.anySource, 9100);
+                        }
+
+                        Logger.Info($"Cluster total matches: {total}");
+                        File.WriteAllText(
+                            config.OutputPath,
+                            $"Pattern: {config.Pattern}{System.Environment.NewLine}" +
+                            $"Input: {config.FilePath}{System.Environment.NewLine}" +
+                            $"Total matches: {total}{System.Environment.NewLine}" +
+                            $"Nodes: {topo.NodeCount}{System.Environment.NewLine}");
+                    }
+                }
                 else
-                    WorkerNode.Run(world, config);
+                {
+                    WorkerNode.Run(topo.NodeComm, config);
+                }
 
                 return 0;
             }

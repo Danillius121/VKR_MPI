@@ -7,13 +7,13 @@ namespace VKR_MPI_V1;
 internal static class WorkerNode
 {
 
-    public static void Run(Communicator world, AppConfig config)
+    public static void Run(Communicator nodeComm, AppConfig config)
     {
         var processor = new RegexChunkProcessor(config);
 
         while (true)
         {
-            (ChunkHeader header, byte[] buffer) = MpiWire.ReceiveChunk(world, 0);
+            (ChunkHeader header, byte[] buffer) = MpiWire.ReceiveChunk(nodeComm, 0);
 
             if (header.IsStopSignal)
                 return;
@@ -23,7 +23,7 @@ internal static class WorkerNode
                 long matches = processor.Process(buffer, header.PrimaryLength, header.ReadLength);
 
                 var result = new ResultHeader(
-                    WorkerRank: world.Rank,
+                    WorkerRank: nodeComm.Rank,
                     FileIndex: header.FileIndex,
                     ChunkIndex: header.ChunkIndex,
                     Success: true,
@@ -31,14 +31,12 @@ internal static class WorkerNode
                     BytesProcessed: header.PrimaryLength,
                     ErrorMessage: null);
 
-                MpiWire.SendResult(world, 0, result);
+                MpiWire.SendResult(nodeComm, 0, result);
             }
             catch (Exception ex)
             {
-                Logger.Error($"Rank {world.Rank}: chunk #{header.ChunkIndex} failed: {ex.Message}");
-
                 var result = new ResultHeader(
-                    WorkerRank: world.Rank,
+                    WorkerRank: nodeComm.Rank,
                     FileIndex: header.FileIndex,
                     ChunkIndex: header.ChunkIndex,
                     Success: false,
@@ -46,7 +44,7 @@ internal static class WorkerNode
                     BytesProcessed: 0,
                     ErrorMessage: ex.Message);
 
-                MpiWire.SendResult(world, 0, result);
+                MpiWire.SendResult(nodeComm, 0, result);
             }
         }
     }
@@ -94,6 +92,7 @@ internal static class WorkerNode
 
                     foreach (Match match in _regex.Matches(segment))
                     {
+                        Console.WriteLine(segment, "\n");
                         int globalMatchStart = slice.Start + match.Index;
                         if (globalMatchStart < primaryCharLimit)
                             local++;

@@ -4,6 +4,7 @@
 public sealed class AppConfig
 {
     public string FilePath { get; set; } = string.Empty;
+    public string OutputPath { get; set; } = "result.txt";
     public string Pattern { get; set; } = string.Empty;
     public int ChunkSizeMB { get; set; } = 16;
     public int OverlapKB { get; set; } = 64;

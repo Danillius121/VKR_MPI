@@ -72,6 +72,7 @@ namespace VKR_MPI_V1
 
                 foreach (Match match in _regex.Matches(segment))
                 {
+                    
                     int globalMatchStart = slice.Start + match.Index;
 
                     // Считаем только совпадения, которые стартуют в основной части чанка.

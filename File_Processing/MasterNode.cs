@@ -6,82 +6,62 @@ namespace VKR_MPI_V1;
 
 internal static class MasterNode
 {
-    public static void Run(Communicator world, AppConfig config)
+
+    public static long Run(Communicator nodeComm, AppConfig config)
     {
         var files = InputDiscovery.ExpandInputs(config.FilePath, config.Recursive);
 
-        if (world.Size < 2)
+        if (nodeComm.Size < 2)
         {
-            Logger.Warn("Need at least 2 MPI processes: 1 master + 1 worker.");
-            return;
+            Logger.Warn($"Node {System.Environment.MachineName}: only one rank here, master will read and count locally.");
+            // Можно либо считать полностью на этом rank, либо оставить без worker'ов.
+            // Проще: работаем как single-process master.
         }
 
-        if (files.Count == 0)
-        {
-            Logger.Warn("No input files found.");
-            StopAllWorkers(world);
-            return;
-        }
-
-        Logger.Info($"Files: {files.Count}");
-        Logger.Info($"Workers: {world.Size - 1}");
-        Logger.Info($"Chunk size: {config.ChunkSizeMB} MB, overlap: {config.OverlapKB} KB");
-        Logger.Info($"Regex: {config.Pattern}");
+        Logger.Info($"Node {System.Environment.MachineName} | local ranks: {nodeComm.Size}");
+        Logger.Info($"Local files: {files.Count}");
 
         using var scheduler = new FileChunkScheduler(files, config);
 
         long totalMatches = 0;
-        long totalBytes = 0;
-        long processedChunks = 0;
-
-        var sw = Stopwatch.StartNew();
-
         int inFlight = 0;
 
-        for (int worker = 1; worker < world.Size; worker++)
+        // Раздаём чанки только локальным worker'ам.
+        for (int worker = 1; worker < nodeComm.Size; worker++)
         {
             if (!scheduler.TryGetNextChunk(out var job))
                 break;
 
-            MpiWire.SendChunk(world, worker, job.Header, job.Buffer);
+            MpiWire.SendChunk(nodeComm, worker, job.Header, job.Buffer);
             inFlight++;
         }
 
         while (inFlight > 0)
         {
-            ResultHeader result = MpiWire.ReceiveResult(world, out int source);
+            ResultHeader result = MpiWire.ReceiveResult(nodeComm, out int source);
             inFlight--;
 
             if (result.Success)
-            {
                 totalMatches += result.Matches;
-                totalBytes += result.BytesProcessed;
-                processedChunks++;
-            }
             else
-            {
-                Logger.Error($"Worker {result.WorkerRank}: file #{result.FileIndex}, chunk #{result.ChunkIndex}: {result.ErrorMessage}");
-            }
+                Logger.Error($"Local worker {result.WorkerRank}: {result.ErrorMessage}");
 
             if (scheduler.TryGetNextChunk(out var nextJob))
             {
-                MpiWire.SendChunk(world, source, nextJob.Header, nextJob.Buffer);
+                MpiWire.SendChunk(nodeComm, source, nextJob.Header, nextJob.Buffer);
                 inFlight++;
             }
         }
 
-        StopAllWorkers(world);
+        StopAllWorkers(nodeComm);
 
-        sw.Stop();
-
-        Logger.Info($"Processed chunks: {processedChunks}");
-        Logger.Info($"Total matches: {totalMatches}");
-        Logger.Info($"Processed bytes: {totalBytes}");
-        Logger.Info($"Elapsed: {sw.Elapsed}");
-        Logger.Info($"Throughput: {Logger.FormatRate(totalBytes, sw.Elapsed)}");
+        Logger.Info($"Node {System.Environment.MachineName}: local matches = {totalMatches}");
+        return totalMatches;
     }
 
-    private static void StopAllWorkers(Communicator world)
+
+
+    private static void StopAllWorkers(Communicator nodeComm)
     {
         var stopHeader = new ChunkHeader(
             IsStopSignal: true,
@@ -92,10 +72,8 @@ internal static class MasterNode
             ReadLength: 0,
             BufferLength: 0);
 
-        for (int worker = 1; worker < world.Size; worker++)
-        {
-            MpiWire.SendChunk(world, worker, stopHeader, Array.Empty<byte>());
-        }
+        for (int worker = 1; worker < nodeComm.Size; worker++)
+            MpiWire.SendChunk(nodeComm, worker, stopHeader, Array.Empty<byte>());
     }
 
     private sealed record ChunkJob(ChunkHeader Header, byte[] Buffer);
