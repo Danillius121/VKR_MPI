@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Text;
+using System.Runtime.Intrinsics.X86;
 
 namespace VKR_MPI_V1
 {
@@ -26,6 +28,8 @@ namespace VKR_MPI_V1
 
     public sealed class RegexChunkProcessor : IChunkProcessor
     {
+        private readonly byte[][] _avx2PrefilterRequiredGroups;
+        private readonly bool _enableAvx2Prefilter;
         private readonly Regex _regex;
         private readonly Encoding _encoding;
         private readonly int _workerThreads;
@@ -33,6 +37,12 @@ namespace VKR_MPI_V1
 
         public RegexChunkProcessor(AppConfig config)
         {
+            _enableAvx2Prefilter = config.EnableAvx2Prefilter;
+
+            _avx2PrefilterRequiredGroups = config.Avx2PrefilterRequiredGroups
+                .Where(group => !string.IsNullOrWhiteSpace(group))
+                .Select(group => Encoding.ASCII.GetBytes(group))
+                .ToArray();
             _encoding = Encoding.GetEncoding(config.EncodingName);
             _workerThreads = Math.Max(1, config.WorkerThreads);
             _intraChunkOverlapChars = Math.Max(0, config.WorkerSubChunkOverlapChars);
@@ -52,7 +62,13 @@ namespace VKR_MPI_V1
         {
             if (chunk.Buffer.Length == 0 || chunk.ReadLength == 0)
                 return 0;
+            if (_enableAvx2Prefilter && _avx2PrefilterRequiredGroups.Length > 0)
+            {
+                ReadOnlySpan<byte> data = chunk.Buffer.AsSpan(0, chunk.ReadLength);
 
+                if (!Avx2Prefilter.ContainsAllGroups(data, _avx2PrefilterRequiredGroups))
+                    return 0;
+            }
             // Полный текст чанка, включая overlap в конце.
             string fullText = _encoding.GetString(chunk.Buffer, 0, chunk.ReadLength);
 
