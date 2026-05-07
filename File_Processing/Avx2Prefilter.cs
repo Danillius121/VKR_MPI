@@ -31,14 +31,18 @@ namespace VKR_MPI_V1
             if (data.IsEmpty || needles.IsEmpty)
                 return false;
 
+            
             if (Avx2.IsSupported && data.Length >= VectorSize)
             {
-                Logger.Info($"pipi");
+                
+
                 if (ContainsAnyAvx2(data, needles))
                     return true;
 
                 return false;
             }
+
+            Logger.Info("Using scalar prefilter path");
 
             return ContainsAnyScalar(data, needles);
         }

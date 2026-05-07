@@ -18,6 +18,7 @@ namespace VKR_MPI_V1
 
             try
             {
+                
                 var config = ConfigLoader.Load("appconfig.json");
                 NodeContext topo = NodeTopology.Initialize(world);
 

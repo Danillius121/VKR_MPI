@@ -9,6 +9,7 @@
     <DockerfileContext>.</DockerfileContext>
     <PlatformTarget>x64</PlatformTarget>
     <EnableUnsafeBinaryFormatterSerialization>true</EnableUnsafeBinaryFormatterSerialization>
+    <Platforms>AnyCPU;x64</Platforms>
   </PropertyGroup>
 
   <ItemGroup>

@@ -51,14 +51,25 @@ internal static class WorkerNode
 
     private sealed class RegexChunkProcessor
     {
-
+        private readonly byte[][] _avx2PrefilterRequiredGroups;
+        private readonly bool _enableAvx2Prefilter;
         private readonly Regex _regex;
         private readonly Encoding _encoding;
         private readonly int _workerThreads;
         private readonly int _sliceOverlapChars;
+        private long _prefilterChecked;
+        private long _prefilterRejected;
+        private long _prefilterAccepted;
 
         public RegexChunkProcessor(AppConfig config)
         {
+            
+        _enableAvx2Prefilter = config.EnableAvx2Prefilter;
+
+            _avx2PrefilterRequiredGroups = config.Avx2PrefilterRequiredGroups
+                .Where(group => !string.IsNullOrWhiteSpace(group))
+                .Select(group => Encoding.ASCII.GetBytes(group))
+                .ToArray();
             _encoding = Encoding.GetEncoding(config.EncodingName);
             _workerThreads = Math.Max(1, config.WorkerThreads);
             _sliceOverlapChars = Math.Max(0, config.WorkerSubChunkOverlapChars);
@@ -75,7 +86,22 @@ internal static class WorkerNode
         {
             if (readLength <= 0 || buffer.Length == 0)
                 return 0;
+            
+            if (_enableAvx2Prefilter && _avx2PrefilterRequiredGroups.Length > 0)
+            {
+                Interlocked.Increment(ref _prefilterChecked);
 
+                ReadOnlySpan<byte> data = buffer.AsSpan(0, readLength);
+
+                if (!Avx2Prefilter.ContainsAllGroups(data, _avx2PrefilterRequiredGroups))
+                {
+                    Interlocked.Increment(ref _prefilterRejected);
+                    return 0;
+                }
+
+                Interlocked.Increment(ref _prefilterAccepted);
+            }
+            
             string text = _encoding.GetString(buffer, 0, readLength);
             int primaryCharLimit = _encoding.GetCharCount(buffer, 0, primaryLength);
 
@@ -101,7 +127,7 @@ internal static class WorkerNode
                     if (local != 0)
                         Interlocked.Add(ref total, local);
                 });
-
+            
             return total;
         }
 
