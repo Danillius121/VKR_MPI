@@ -9,6 +9,7 @@ internal static class MasterNode
 
     public static long Run(Communicator nodeComm, AppConfig config)
     {
+        Stopwatch totalSw = Stopwatch.StartNew();
         var files = InputDiscovery.ExpandInputs(config.FilePath, config.Recursive);
 
         if (nodeComm.Size < 2)
@@ -56,6 +57,9 @@ internal static class MasterNode
         StopAllWorkers(nodeComm);
 
         Logger.Info($"Node {System.Environment.MachineName}: local matches = {totalMatches}");
+        totalSw.Stop();
+
+        Logger.Info($"Master total elapsed: {totalSw.ElapsedMilliseconds} ms");
         return totalMatches;
     }
 

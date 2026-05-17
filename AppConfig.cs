@@ -8,6 +8,7 @@ public sealed class AppConfig
     public bool EnableAvx2Prefilter { get; set; } = false;
 
     public string[] Avx2PrefilterRequiredGroups { get; set; } = Array.Empty<string>();
+    public string[][] Avx2PrefilterRequiredWordGroups { get; set; } = Array.Empty<string[]>();
     public string OutputPath { get; set; } = "result.txt";
     public string Pattern { get; set; } = string.Empty;
     public int ChunkSizeMB { get; set; } = 16;

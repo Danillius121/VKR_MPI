@@ -1,6 +1,7 @@
 ﻿using MPI;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Diagnostics;
 
 namespace VKR_MPI_V1;
 
@@ -53,6 +54,7 @@ internal static class WorkerNode
     {
         private readonly byte[][] _avx2PrefilterRequiredGroups;
         private readonly bool _enableAvx2Prefilter;
+        private readonly byte[][][] _avx2PrefilterRequiredWordGroups;
         private readonly Regex _regex;
         private readonly Encoding _encoding;
         private readonly int _workerThreads;
@@ -60,16 +62,27 @@ internal static class WorkerNode
         private long _prefilterChecked;
         private long _prefilterRejected;
         private long _prefilterAccepted;
+        private long _wordPrefilterChecked;
+        private long _wordPrefilterRejected;
+        private long _wordPrefilterAccepted;
 
         public RegexChunkProcessor(AppConfig config)
         {
             
-        _enableAvx2Prefilter = config.EnableAvx2Prefilter;
+            _enableAvx2Prefilter = config.EnableAvx2Prefilter;
 
             _avx2PrefilterRequiredGroups = config.Avx2PrefilterRequiredGroups
                 .Where(group => !string.IsNullOrWhiteSpace(group))
                 .Select(group => Encoding.ASCII.GetBytes(group))
                 .ToArray();
+            _avx2PrefilterRequiredWordGroups = config.Avx2PrefilterRequiredWordGroups
+            .Where(group => group != null && group.Length > 0)
+            .Select(group => group
+                .Where(word => !string.IsNullOrWhiteSpace(word))
+                .Select(word => Encoding.ASCII.GetBytes(word))
+                .ToArray())
+            .Where(group => group.Length > 0)
+            .ToArray();
             _encoding = Encoding.GetEncoding(config.EncodingName);
             _workerThreads = Math.Max(1, config.WorkerThreads);
             _sliceOverlapChars = Math.Max(0, config.WorkerSubChunkOverlapChars);
@@ -84,25 +97,51 @@ internal static class WorkerNode
 
         public long Process(byte[] buffer, int primaryLength, int readLength)
         {
-            if (readLength <= 0 || buffer.Length == 0)
-                return 0;
-            
-            if (_enableAvx2Prefilter && _avx2PrefilterRequiredGroups.Length > 0)
+            Stopwatch totalSw = Stopwatch.StartNew();
+
+            long prefilterMs = 0;
+            long decodeMs = 0;
+            long regexMs = 0;
+
+            bool rejectedByPrefilter = false;
+
+            if (_enableAvx2Prefilter && _avx2PrefilterRequiredWordGroups.Length > 0)
             {
-                Interlocked.Increment(ref _prefilterChecked);
+                Stopwatch prefilterSw = Stopwatch.StartNew();
 
                 ReadOnlySpan<byte> data = buffer.AsSpan(0, readLength);
 
-                if (!Avx2Prefilter.ContainsAllGroups(data, _avx2PrefilterRequiredGroups))
+                if (!Avx2Prefilter.ContainsAllWordGroups(data, _avx2PrefilterRequiredWordGroups))
                 {
-                    Interlocked.Increment(ref _prefilterRejected);
-                    return 0;
+                    rejectedByPrefilter = true;
                 }
 
-                Interlocked.Increment(ref _prefilterAccepted);
+                prefilterSw.Stop();
+                prefilterMs = prefilterSw.ElapsedMilliseconds;
+
+                if (rejectedByPrefilter)
+                {
+                    totalSw.Stop();
+
+                    Logger.Info(
+                        $"Chunk timing: total={totalSw.ElapsedMilliseconds} ms, " +
+                        $"prefilter={prefilterMs} ms, " +
+                        $"decode=0 ms, regex=0 ms, " +
+                        $"readLength={readLength}, rejectedByPrefilter=True");
+
+                    return 0;
+                }
             }
-            
+
+            Stopwatch decodeSw = Stopwatch.StartNew();
+
             string text = _encoding.GetString(buffer, 0, readLength);
+
+            decodeSw.Stop();
+            decodeMs = decodeSw.ElapsedMilliseconds;
+
+            Stopwatch regexSw = Stopwatch.StartNew();
+
             int primaryCharLimit = _encoding.GetCharCount(buffer, 0, primaryLength);
 
             var slices = BuildSlices(text, _workerThreads, _sliceOverlapChars);
@@ -118,7 +157,7 @@ internal static class WorkerNode
 
                     foreach (Match match in _regex.Matches(segment))
                     {
-                        Console.WriteLine(segment, "\n");
+                        //Console.WriteLine(segment, "\n");
                         int globalMatchStart = slice.Start + match.Index;
                         if (globalMatchStart < primaryCharLimit)
                             local++;
@@ -127,7 +166,21 @@ internal static class WorkerNode
                     if (local != 0)
                         Interlocked.Add(ref total, local);
                 });
+            regexSw.Stop();
+            regexMs = regexSw.ElapsedMilliseconds;
+
+            totalSw.Stop();
+
+            Logger.Info(
+                $"Chunk timing: total={totalSw.ElapsedMilliseconds} ms, " +
+                $"prefilter={prefilterMs} ms, " +
+                $"decode={decodeMs} ms, " +
+                $"regex={regexMs} ms, " +
+                $"readLength={readLength}, matches={total}, " +
+                $"rejectedByPrefilter=False");
+
             
+
             return total;
         }
 
