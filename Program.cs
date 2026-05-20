@@ -1,4 +1,4 @@
-﻿using MPI; // Не забудь добавить ссылку на библиотеку через NuGet
+﻿using MPI; 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,14 +12,14 @@ class Program
     // Теги для MPI сообщений
     enum MsgTag
     {
-        TaskRequest = 100,  // Воркер просит работу
+        TaskRequest = 100,  // Рабочий просит работу
         TaskResponse = 101, // Мастер дает (Offset)
         TaskFinish = 102,   // Мастер говорит "Работ больше нет"
-        ResultReport = 103  // Воркер шлет количество найденных строк
+        ResultReport = 103  // Воркер отправляет количество найденных строк
     }
 
     // Глобальные настройки
-    static long minSizeInBytes = 256 * 1024 * 1024; // По умолчанию 64 МБ
+    static long minSizeInBytes = 256 * 1024 * 1024; // По умолчанию 256 МБ
 
     static readonly object ConsoleLock = new object();
     static StreamWriter? traceWriter;
@@ -59,7 +59,7 @@ class Program
                 pathData = System.Text.Encoding.UTF8.GetBytes(targetPath);
                 pathLength = pathData.Length;
 
-                Console.WriteLine("\n--- ВЫБОР СТРАТЕГИИ РАСПРЕДЕЛЕНИЯ ---");
+                Console.WriteLine("\nВЫБОР СТРАТЕГИИ РАСПРЕДЕЛЕНИЯ");
                 Console.WriteLine("1. Раздача по целым файлам (File-per-Worker)");
                 Console.WriteLine("2. Квантование одного файла (Dynamic Task Farm)");
                 Console.Write("Выбор: ");
@@ -89,28 +89,28 @@ class Program
             // Передаем длину паттерна всем узлам
             comm.Broadcast(ref patternLength, 0);
 
-            // Воркеры готовят буфер
+            // Рабочие готовят буфер
             if (comm.Rank != 0) patternData = new byte[patternLength];
 
             // Передаем сами байты паттерна
             comm.Broadcast(ref patternData, 0);
 
-            // Восстанавливаем строку на воркерах
+            // Восстанавливаем строку на рабочих процессах
             if (comm.Rank != 0) pattern = System.Text.Encoding.UTF8.GetString(patternData);
               
-            // Инициализируем Regex (скомпилированный вариант для скорости)
+            // Инициализируем Regex
             Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
 
-            // Рассылаем выбор всем (через наш стабильный метод с массивом)
+            // Рассылаем выбор всем
             int[] modeBuf = { processingMode };
             comm.Broadcast(ref modeBuf, 0);
             processingMode = modeBuf[0];
 
-            // Передаем массив из одного целого числа (это самая стабильная операция в MPI.NET)
+            // Передаем массив из одного целого числа
             comm.Broadcast(ref modeBuffer, 0);
 
-            // Все воркеры забирают значение из буфера
+            // Все рабочие забирают значение из буфера
             if (comm.Rank != 0) outputMode = modeBuffer[0];
 
             bool saveToFile = (outputMode == 2);
@@ -118,16 +118,16 @@ class Program
             // Барьер для фиксации настроек на всех узлах
             comm.Barrier();
 
-            // 1. Сначала ВСЕ (и Мастер, и Воркеры) синхронно обмениваются длиной строки
+            // 1. Сначала все синхронно обмениваются длиной строки
             comm.Broadcast(ref pathLength, 0);
 
-            // 2. Теперь Воркеры готовят буфер нужного размера
+            // 2. Теперь рабочие готовят буфер нужного размера
             if (comm.Rank != 0) pathData = new byte[pathLength];
 
-            // 3. ВСЕ (и Мастер, и Воркеры) синхронно передают/принимают сами байты
+            // 3. Все синхронно передают/принимают сами байты
             comm.Broadcast(ref pathData, 0);
 
-            // 4. Воркеры восстанавливают строку из байт
+            // 4. Рабочие восстанавливают строку из байт
             if (comm.Rank != 0) targetPath = System.Text.Encoding.UTF8.GetString(pathData);
 
             // ВАЖНО: Добавь Barrier, чтобы никто не начал сканировать диск раньше времени
@@ -137,24 +137,24 @@ class Program
             //-----------------------------------------------------------------------------
             if (processingMode == 1)
             {
-                // Тот код, который мы отладили (раздача путей через Send/Receive)
+                
                 RunMultiFileSearch(comm, targetPath, saveToFile, regex);
             }
             else
             {
-                // РЕЖИМ 2: Один большой файл
+                
                 if (comm.Rank == 0)
                 {
                     Stopwatch totalSw = Stopwatch.StartNew();
-                    // Мастер становится Диспетчером
+                    
                     long totalMatches = Master_ScheduleLargeFile(comm, targetPath, minSizeInBytes);
                     totalSw.Stop();
-                    // Вывод итогов только здесь
+                    
                     PrintFinalResult(totalMatches, totalSw.Elapsed.TotalSeconds);
                 }
                 else
                 {
-                    // Воркеры уходят в цикл запроса задач
+                    // Рабочие уходят в цикл запроса задач
                     Worker_ProcessLargeFile(comm, targetPath, regex, minSizeInBytes);
                     traceWriter?.Dispose();
                 }
@@ -171,7 +171,7 @@ class Program
     static void RunMultiFileSearch(Intracommunicator comm, string targetPath, bool saveToFile, Regex regex)
     {
 
-        // Теперь каждый процесс безопасно получает список доступных файлов
+        
         List<string> myTaskFiles = new List<string>();
 
         if (comm.Rank == 0)
@@ -180,7 +180,7 @@ class Program
             List<string> allFiles = GetFilesSafe(targetPath);
             Console.WriteLine($"[MASTER] Найдено файлов: {allFiles.Count}");
 
-            // Мастер раздает файлы воркерам
+            
             for (int i = 0; i < allFiles.Count; i++)
             {
                 int targetRank = i % comm.Size;
@@ -207,15 +207,15 @@ class Program
         }
         else
         {
-            // ВОРКЕРЫ: Принимают байты и превращают их обратно в строки
+            // Рабочие принимают байты и превращают их обратно в строки
             while (true)
             {
                 int length = 0;
-                comm.Receive(0, 10, out length); // Ждем длину
+                comm.Receive(0, 10, out length); 
                 if (length == -1) break; // Стоп-сигнал
 
                 byte[] buffer = new byte[length];
-                comm.Receive(0, 11, ref buffer); // Ждем данные
+                comm.Receive(0, 11, ref buffer); 
                 string receivedPath = System.Text.Encoding.UTF8.GetString(buffer);
                 myTaskFiles.Add(receivedPath);
             }
@@ -237,11 +237,11 @@ class Program
         Stopwatch totalSw = Stopwatch.StartNew();
 
         long localMatches = 0;
-        // Инициализируем StreamWriter, если выбрано сохранение в файл
+        
         StreamWriter writer = null;
         if (saveToFile)
         {
-            // Каждый процесс пишет в свой файл: это "Best Practice" для MPI
+            
             writer = new StreamWriter($"results_rank_{comm.Rank}.txt", false);
         }
 
@@ -266,8 +266,8 @@ class Program
                             }
                             else
                             {
-                                // ВЫВОД В КОНСОЛЬ С ПОДСВЕТКОЙ
-                                lock (Console.Out) // Минимальная защита от перемешивания строк
+                                
+                                lock (Console.Out) 
                                 {
                                     Console.ForegroundColor = ConsoleColor.Cyan;
                                     Console.Write($"[Rank {comm.Rank}] ");
@@ -296,9 +296,9 @@ class Program
         if (comm.Rank == 0)
         {
             Console.WriteLine("\n" + new string('=', 40));
-            Console.WriteLine($"✅ ПОЛНОЕ ВРЕМЯ РАБОТЫ: {totalSw.Elapsed.TotalSeconds:F3} сек.");
-            Console.WriteLine($"📊 Найдено всего: {totalMatches}");
-            if (saveToFile) Console.WriteLine("📂 Результаты сохранены в раздельные файлы по рангам.");
+            Console.WriteLine($" ПОЛНОЕ ВРЕМЯ РАБОТЫ: {totalSw.Elapsed.TotalSeconds:F3} сек.");
+            Console.WriteLine($" Найдено всего: {totalMatches}");
+            if (saveToFile) Console.WriteLine(" Результаты сохранены в раздельные файлы по рангам.");
             Console.WriteLine(new string('=', 40));
         }
 
@@ -319,11 +319,6 @@ class Program
         }
     }
 
-    static void RunSingleLargeFileSearch()
-    {
-
-    }
-
     static Queue<long> CreateTaskQueue(string filePath, long minSize)
     {
         Queue<long> offsets = new Queue<long>();
@@ -336,95 +331,15 @@ class Program
             currentOffset += minSize;
 
             // Если остаток меньше минимального размера, 
-            // мы не создаем новый маленький блок (Пункт 2)
+            // не создаем новый маленький блок
             if (fileSize - currentOffset < minSize) break;
         }
         return offsets;
     }
 
-    static long FindNextLineStart(FileStream fs, long startOffset)
-    {
-        if (startOffset == 0) return 0; // Первый блок всегда с начала
-
-        fs.Seek(startOffset, SeekOrigin.Begin);
-        // Читаем побайтово до конца строки
-        int b;
-        while ((b = fs.ReadByte()) != -1)
-        {
-            if (b == '\n') return fs.Position; // Возвращаем позицию СЛЕДУЮЩЕГО байта
-        }
-        return fs.Length; // Если \n не нашли до конца файла
-    }
-    /*
-    static long Worker_ProcessLargeFile(Intracommunicator comm, string filePath, Regex regex, long minSize)
-    {
-        long localCount = 0;
-        while (true)
-        {
-            // 1. Запрашиваем задачу у Мастера (Тег TaskRequest)
-            int requestSignal = 1;
-            comm.Send(requestSignal, 0, (int)MsgTag.TaskRequest);
-
-            // 2. Ждем ответ: смещение (Offset) или сигнал финиша
-            long startOffset;
-            comm.Receive(0, (int)MsgTag.TaskResponse, out startOffset);
-
-            // Если пришел -1, значит задач в очереди Мастера больше нет
-            if (startOffset == -1) break;
-
-            // 3. Работаем с блоком
-            localCount += ProcessFileChunk(filePath, startOffset, minSize, regex);
-        }
-        return localCount;
-    }
-    */
-    static long ProcessFileChunk(string path, long startOffset, long minSize, Regex regex)
-    {
-        long matches = 0;
-
-        // FileShare.ReadWrite безопаснее, если лог в данный момент пишется другим приложением
-        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-        {
-            // 1. Быстрый пропуск хвоста предыдущей строки, если мы не в начале файла
-            if (startOffset > 0)
-            {
-                fs.Position = startOffset;
-                int b;
-                // Ищем первый перенос строки
-                while ((b = fs.ReadByte()) != -1)
-                {
-                    if (b == '\n') break;
-                }
-            }
-
-            long currentBytesProcessed = 0;
-
-            using (StreamReader sr = new StreamReader(fs, System.Text.Encoding.UTF8))
-            {
-                string line;
-
-                // Читаем строки до тех пор, пока сумма их длин не превысит размер нашего квантума
-                while (currentBytesProcessed < minSize && (line = sr.ReadLine()) != null)
-                {
-                    if (regex.IsMatch(line))
-                    {
-                        matches++;
-                    }
-
-                    // Вычисляем реальный вес строки в байтах.
-                    // +2 добавлено для учета символов переноса строки (\r\n) в Windows.
-                    // Если логи с Linux-серверов (\n), измените +2 на +1.
-                    currentBytesProcessed += System.Text.Encoding.UTF8.GetByteCount(line) + 2;
-                }
-            }
-        }
-
-        return matches;
-    }
-
     static long Master_ScheduleLargeFile(Intracommunicator comm, string filePath, long minSize)
     {
-        // 1. Создаем очередь задач (Квантование файла)
+        // 1. Создаем очередь задач
         Queue<long> taskQueue = CreateTaskQueue(filePath, minSize);
         int totalTasks = taskQueue.Count;
         int completedTasks = 0;
@@ -433,17 +348,17 @@ class Program
         Console.WriteLine($"[MASTER] Создано задач: {totalTasks}. Раздаю воркерам...");
 
         // 2. Цикл обработки запросов
-        // Мы продолжаем, пока не закроем все задачи и не получим отчеты от всех воркеров
+        // Продолжаем, пока не закроем все задачи и не получим отчеты от всех рабочих
         int activeWorkers = comm.Size - 1;
 
         while (activeWorkers > 0)
         {
-            // Ждем сообщение от любого воркера (тег TaskRequest или ResultReport)
+            // Ждем сообщение от любого рабочего
             Status status = comm.Probe(Communicator.anySource, Communicator.anyTag);
 
             if (status.Tag == (int)MsgTag.TaskRequest)
             {
-                // Воркер просит задачу
+                // Рабочий просит задачу
                 int dummy;
                 comm.Receive(status.Source, (int)MsgTag.TaskRequest, out dummy);
 
@@ -457,20 +372,16 @@ class Program
                     // Задач нет - шлем сигнал финиша
                     long stopSignal = -1;
                     comm.Send(stopSignal, status.Source, (int)MsgTag.TaskResponse);
-                    activeWorkers--; // Этот воркер больше не вернется
+                    activeWorkers--; 
                 }
             }
             else if (status.Tag == (int)MsgTag.ResultReport)
             {
-                // Воркер прислал количество найденных строк в своем блоке
+                
                 long workerResult;
                 comm.Receive(status.Source, (int)MsgTag.ResultReport, out workerResult);
                 totalMatches += workerResult;
                 completedTasks++;
-
-                // Выводим прогресс на мастере 
-                //if (totalTasks > 0)
-                    //DrawProgressBar(completedTasks, totalTasks);
             }
         }
 
@@ -486,7 +397,7 @@ class Program
         int rank = comm.Rank;
         Trace(rank, $"Worker started. file={filePath}, chunkSize={chunkSize}");
 
-        // Один FileStream на весь worker (ВАЖНО)
+        // Один FileStream на весь worker
         using FileStream fs = new FileStream(
             filePath,
             FileMode.Open,
@@ -501,7 +412,7 @@ class Program
 
         while (true)
         {
-            // === REQUEST ===
+            
             comm.Send(0, 0, (int)MsgTag.TaskRequest);
 
             long offset;
@@ -518,10 +429,10 @@ class Program
             long matches = 0;
             long end = Math.Min(offset + chunkSize, fs.Length);
 
-            // === SEEK ===
+            
             fs.Seek(offset, SeekOrigin.Begin);
 
-            // === ALIGN TO LINE START (если не первый блок) ===
+            
             if (offset != 0)
             {
                 int b;
@@ -566,7 +477,7 @@ class Program
                 currentPos = fs.Position;
             }
 
-            // === ДОЧИТЫВАЕМ ХВОСТ СТРОКИ ===
+            
             int nextByte;
             while ((nextByte = fs.ReadByte()) != -1)
             {
@@ -604,9 +515,6 @@ class Program
         Console.ResetColor();
         Console.WriteLine($" Найдено совпадений: {totalMatches}");
         Console.WriteLine($" Полное время работы: {elapsed:F3} сек.");
-
-        // Для диплома: расчет теоретической пропускной способности
-        // (если добавишь размер файла в аргументы)
         Console.WriteLine(new string('=', 40));
         Console.WriteLine("Нажмите Enter для выхода...");
         Console.ReadLine();
