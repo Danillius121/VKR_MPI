@@ -5,6 +5,10 @@ public sealed class AppConfig
 {
     public string FilePath { get; set; } = string.Empty;
 
+    public string DistributionStrategy { get; set; } = "DynamicSingleReader";
+
+    public long DynamicOffsetChunkSizeBytes { get; set; } = 256L * 1024 * 1024;
+
     public bool EnableAvx2Prefilter { get; set; } = false;
 
     public string[] Avx2PrefilterRequiredGroups { get; set; } = Array.Empty<string>();
